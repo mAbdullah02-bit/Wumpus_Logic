@@ -1,0 +1,421 @@
+"""
+Wumpus World – Knowledge-Based Agent with Propositional Logic
+Implements:
+  - Knowledge Base (KB) with TELL / ASK interface
+  - CNF (Conjunctive Normal Form) conversion
+  - Resolution Refutation (proof by contradiction)
+"""
+
+import random
+import itertools
+from typing import List, Set, Tuple, Dict, Optional, FrozenSet
+
+
+# ---------------------------------------------------------------------------
+# Clause representation  (a clause = frozenset of literals)
+# A literal is a string like "P_2_1" (positive) or "~P_2_1" (negative)
+# ---------------------------------------------------------------------------
+
+Literal = str
+Clause  = FrozenSet[Literal]
+
+
+def neg(lit: Literal) -> Literal:
+    """Negate a literal."""
+    return lit[1:] if lit.startswith("~") else "~" + lit
+
+
+def resolve(c1: Clause, c2: Clause) -> Optional[Clause]:
+    """
+    Resolution rule: given c1 and c2, if there exists a literal L such that
+    L ∈ c1 and ¬L ∈ c2, return the resolvent (c1 \ {L}) ∪ (c2 \ {¬L}).
+    Returns None if no resolution is possible, or the empty clause (contradiction).
+    """
+    for lit in c1:
+        complement = neg(lit)
+        if complement in c2:
+            resolvent = (c1 - {lit}) | (c2 - {complement})
+            return frozenset(resolvent)
+    return None
+
+
+def resolution_refutation(kb_clauses: List[Clause], goal_clauses: List[Clause]) -> Tuple[bool, int]:
+    """
+    Resolution Refutation:
+      To prove α, add ¬α to the KB and show the result is UNSATISFIABLE
+      (i.e., derive the empty clause ⊥).
+
+    Returns (proved: bool, steps: int).
+    """
+    clauses: Set[Clause] = set(kb_clauses) | set(goal_clauses)
+    steps = 0
+    while True:
+        new: Set[Clause] = set()
+        clause_list = list(clauses)
+        for i, ci in enumerate(clause_list):
+            for j, cj in enumerate(clause_list):
+                if i >= j:
+                    continue
+                resolvent = resolve(ci, cj)
+                if resolvent is not None:
+                    steps += 1
+                    if len(resolvent) == 0:
+                        return True, steps   # empty clause → contradiction → proved
+                    new.add(resolvent)
+        if new.issubset(clauses):
+            return False, steps              # no new clauses → cannot prove
+        clauses |= new
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Base
+# ---------------------------------------------------------------------------
+
+class KnowledgeBase:
+    """
+    Propositional-logic KB for a Wumpus World agent.
+
+    Atom naming:
+      P_r_c  – there is a Pit at (r, c)
+      W_r_c  – there is a Wumpus at (r, c)
+      B_r_c  – Breeze perceived at (r, c)
+      S_r_c  – Stench perceived at (r, c)
+    """
+
+    def __init__(self, rows: int, cols: int):
+        self.rows  = rows
+        self.cols  = cols
+        self.clauses: List[Clause] = []
+        self.inference_steps = 0
+        self._add_world_axioms()
+
+    # ---- helpers ----
+
+    def _adj(self, r: int, c: int) -> List[Tuple[int,int]]:
+        result = []
+        for dr, dc in [(-1,0),(1,0),(0,-1),(0,1)]:
+            nr, nc = r+dr, c+dc
+            if 1 <= nr <= self.rows and 1 <= nc <= self.cols:
+                result.append((nr, nc))
+        return result
+
+    def _pit(self, r, c):  return f"P_{r}_{c}"
+    def _wmp(self, r, c):  return f"W_{r}_{c}"
+    def _brz(self, r, c):  return f"B_{r}_{c}"
+    def _stn(self, r, c):  return f"S_{r}_{c}"
+
+    def _tell(self, clause: Clause):
+        if clause not in self.clauses:
+            self.clauses.append(clause)
+
+    # ---- world axioms ----
+
+    def _add_world_axioms(self):
+        """
+        For every cell, encode:
+          B_r,c ⇔ (∨ P_adj)   via CNF
+          S_r,c ⇔ (∨ W_adj)   via CNF
+        """
+        for r in range(1, self.rows+1):
+            for c in range(1, self.cols+1):
+                adj = self._adj(r, c)
+                b, s = self._brz(r,c), self._stn(r,c)
+
+                # B_r,c → P_a1 ∨ P_a2 ∨ …   becomes   ¬B ∨ P_a1 ∨ P_a2 …
+                if adj:
+                    fwd_pit = frozenset([neg(b)] + [self._pit(ar,ac) for ar,ac in adj])
+                    fwd_wmp = frozenset([neg(s)] + [self._wmp(ar,ac) for ar,ac in adj])
+                    self._tell(fwd_pit)
+                    self._tell(fwd_wmp)
+
+                # P_ai → B_r,c  becomes  ¬P_ai ∨ B_r,c   (for each adj)
+                for ar, ac in adj:
+                    self._tell(frozenset([neg(self._pit(ar,ac)), b]))
+                    self._tell(frozenset([neg(self._wmp(ar,ac)), s]))
+
+    # ---- TELL interface ----
+
+    def tell_visited_safe(self, r: int, c: int):
+        """Assert that cell (r,c) is safe (no pit, no wumpus)."""
+        self._tell(frozenset([neg(self._pit(r,c))]))
+        self._tell(frozenset([neg(self._wmp(r,c))]))
+
+    def tell_breeze(self, r: int, c: int, has_breeze: bool):
+        lit = self._brz(r,c)
+        self._tell(frozenset([lit if has_breeze else neg(lit)]))
+
+    def tell_stench(self, r: int, c: int, has_stench: bool):
+        lit = self._stn(r,c)
+        self._tell(frozenset([lit if has_stench else neg(lit)]))
+
+    def tell_pit(self, r: int, c: int):
+        self._tell(frozenset([self._pit(r,c)]))
+
+    def tell_wumpus(self, r: int, c: int):
+        self._tell(frozenset([self._wmp(r,c)]))
+
+    # ---- ASK interface ----
+
+    def ask_safe(self, r: int, c: int) -> Tuple[bool, int]:
+        """
+        Query: is cell (r,c) definitely free of both pit and wumpus?
+        Uses Resolution Refutation twice (once for pit, once for wumpus).
+        Returns (is_safe, steps_used).
+        """
+        # To prove ¬P_r,c: negate it → add P_r,c as a unit clause and seek ⊥
+        no_pit_goal   = [frozenset([self._pit(r,c)])]
+        no_wump_goal  = [frozenset([self._wmp(r,c)])]
+
+        proved_no_pit,  s1 = resolution_refutation(self.clauses, no_pit_goal)
+        proved_no_wump, s2 = resolution_refutation(self.clauses, no_wump_goal)
+
+        steps = s1 + s2
+        self.inference_steps += steps
+        return (proved_no_pit and proved_no_wump), steps
+
+    def ask_definitely_pit(self, r: int, c: int) -> Tuple[bool, int]:
+        """Prove P_r,c by refuting its negation."""
+        goal = [frozenset([neg(self._pit(r,c))])]
+        proved, steps = resolution_refutation(self.clauses, goal)
+        self.inference_steps += steps
+        return proved, steps
+
+    def ask_definitely_wumpus(self, r: int, c: int) -> Tuple[bool, int]:
+        goal = [frozenset([neg(self._wmp(r,c))])]
+        proved, steps = resolution_refutation(self.clauses, goal)
+        self.inference_steps += steps
+        return proved, steps
+
+
+# ---------------------------------------------------------------------------
+# World (environment)
+# ---------------------------------------------------------------------------
+
+class WumpusWorld:
+    """
+    Manages the true environment state – hidden from the agent.
+    """
+
+    def __init__(self, rows: int, cols: int, num_pits: int = None):
+        self.rows = rows
+        self.cols = cols
+        self.pits:   Set[Tuple[int,int]] = set()
+        self.wumpus: Optional[Tuple[int,int]] = None
+        self.gold:   Optional[Tuple[int,int]] = None
+        self._place_hazards(num_pits or max(1, (rows*cols)//6))
+
+    def _place_hazards(self, num_pits: int):
+        all_cells = [(r,c) for r in range(1,self.rows+1) for c in range(1,self.cols+1)
+                     if (r,c) != (1,1)]
+        random.shuffle(all_cells)
+        for cell in all_cells[:num_pits]:
+            self.pits.add(cell)
+        if len(all_cells) > num_pits:
+            self.wumpus = all_cells[num_pits]
+        if len(all_cells) > num_pits + 1:
+            self.gold = all_cells[num_pits + 1]
+
+    def percepts(self, r: int, c: int) -> Dict[str, bool]:
+        adj = [(r+dr, c+dc) for dr,dc in [(-1,0),(1,0),(0,-1),(0,1)]
+               if 1 <= r+dr <= self.rows and 1 <= c+dc <= self.cols]
+        breeze = any(cell in self.pits   for cell in adj)
+        stench = any(cell == self.wumpus for cell in adj)
+        pit    = (r,c) in self.pits
+        wumpus = (r,c) == self.wumpus
+        gold   = (r,c) == self.gold
+        return {"breeze": breeze, "stench": stench, "pit": pit,
+                "wumpus": wumpus, "gold": gold}
+
+
+# ---------------------------------------------------------------------------
+# Agent
+# ---------------------------------------------------------------------------
+
+class WumpusAgent:
+    """
+    Knowledge-Based Agent that navigates the Wumpus World using
+    Propositional Logic and Resolution Refutation.
+    """
+
+    def __init__(self, rows: int, cols: int):
+        self.rows  = rows
+        self.cols  = cols
+        self.kb    = KnowledgeBase(rows, cols)
+        self.pos   = (1, 1)
+        self.visited:   Set[Tuple[int,int]]         = set()
+        self.safe_cells: Set[Tuple[int,int]]        = set()
+        self.confirmed_pits: Set[Tuple[int,int]]    = set()
+        self.confirmed_wumpus: Optional[Tuple[int,int]] = None
+        self.cell_status: Dict[Tuple[int,int], str] = {}   # safe/unknown/pit/wumpus/visited
+        self.alive  = True
+        self.has_gold = False
+        self.log:   List[str] = []
+        self._init_cell_status()
+
+    def _init_cell_status(self):
+        for r in range(1, self.rows+1):
+            for c in range(1, self.cols+1):
+                self.cell_status[(r,c)] = "unknown"
+
+    def _adj(self, r: int, c: int) -> List[Tuple[int,int]]:
+        result = []
+        for dr,dc in [(-1,0),(1,0),(0,-1),(0,1)]:
+            nr,nc = r+dr, c+dc
+            if 1 <= nr <= self.rows and 1 <= nc <= self.cols:
+                result.append((nr,nc))
+        return result
+
+    def enter_cell(self, world: WumpusWorld) -> Dict:
+        """
+        Agent enters its current cell:
+          1. Receive percepts
+          2. TELL KB
+          3. Check for death
+          4. Infer safe neighbours
+        Returns step info dict.
+        """
+        r, c = self.pos
+        percepts = world.percepts(r, c)
+
+        if percepts["pit"] or percepts["wumpus"]:
+            self.alive = False
+            cause = "Pit" if percepts["pit"] else "Wumpus"
+            self.cell_status[(r,c)] = "pit" if percepts["pit"] else "wumpus"
+            self.log.append(f"Agent died at ({r},{c}) – {cause}!")
+            return {"alive": False, "percepts": percepts, "inferences": []}
+
+        if percepts["gold"]:
+            self.has_gold = True
+            self.log.append(f"Gold found at ({r},{c})!")
+
+        self.visited.add((r,c))
+        self.safe_cells.add((r,c))
+        self.cell_status[(r,c)] = "visited"
+
+        # TELL the KB
+        self.kb.tell_visited_safe(r, c)
+        self.kb.tell_breeze(r, c, percepts["breeze"])
+        self.kb.tell_stench(r, c, percepts["stench"])
+
+        self.log.append(
+            f"At ({r},{c}): {'Breeze ' if percepts['breeze'] else ''}"
+            f"{'Stench' if percepts['stench'] else ''}"
+            f"{'' if percepts['breeze'] or percepts['stench'] else 'No percepts'}"
+        )
+
+        # ASK KB about each unvisited neighbour
+        inferences = []
+        for nr, nc in self._adj(r, c):
+            if (nr,nc) in self.visited:
+                continue
+            is_safe, steps = self.kb.ask_safe(nr, nc)
+            is_pit,  sp    = self.kb.ask_definitely_pit(nr, nc)
+            is_wmp,  sw    = self.kb.ask_definitely_wumpus(nr, nc)
+
+            status_before = self.cell_status.get((nr,nc), "unknown")
+            if is_safe:
+                self.safe_cells.add((nr,nc))
+                self.cell_status[(nr,nc)] = "safe"
+                inferences.append({"cell": [nr,nc], "result": "safe", "steps": steps})
+                self.log.append(f"  Inferred ({nr},{nc}) is SAFE ({steps} steps)")
+            elif is_pit:
+                self.confirmed_pits.add((nr,nc))
+                self.cell_status[(nr,nc)] = "pit"
+                self.kb.tell_pit(nr,nc)
+                inferences.append({"cell": [nr,nc], "result": "pit", "steps": sp})
+                self.log.append(f"  Inferred ({nr},{nc}) is PIT ({sp} steps)")
+            elif is_wmp:
+                self.confirmed_wumpus = (nr,nc)
+                self.cell_status[(nr,nc)] = "wumpus"
+                self.kb.tell_wumpus(nr,nc)
+                inferences.append({"cell": [nr,nc], "result": "wumpus", "steps": sw})
+                self.log.append(f"  Inferred ({nr},{nc}) is WUMPUS ({sw} steps)")
+            else:
+                if self.cell_status[(nr,nc)] == "unknown":
+                    pass  # stays unknown
+                inferences.append({"cell": [nr,nc], "result": "unknown", "steps": steps})
+
+        return {
+            "alive": True,
+            "percepts": percepts,
+            "inferences": inferences,
+            "pos": [r, c],
+            "gold": self.has_gold
+        }
+
+    def choose_next(self) -> Optional[Tuple[int,int]]:
+        """
+        BFS-style: prefer provably safe unvisited neighbours,
+        fall back to frontier safe cells, or None if stuck.
+        """
+        r, c = self.pos
+        # 1. adjacent safe unvisited
+        for nr, nc in self._adj(r, c):
+            if (nr,nc) not in self.visited and self.cell_status.get((nr,nc)) == "safe":
+                return (nr, nc)
+        # 2. any safe unvisited reachable (simple BFS)
+        from collections import deque
+        q = deque([self.pos])
+        seen = {self.pos}
+        while q:
+            cur = q.popleft()
+            for nb in self._adj(*cur):
+                if nb in seen:
+                    continue
+                seen.add(nb)
+                status = self.cell_status.get(nb, "unknown")
+                if status in ("safe", "visited"):
+                    if nb not in self.visited and status == "safe":
+                        return nb
+                    if status == "visited":
+                        q.append(nb)
+        return None   # no safe move found
+
+
+# ---------------------------------------------------------------------------
+# Full episode runner (used by the Flask API)
+# ---------------------------------------------------------------------------
+
+def run_episode(rows: int, cols: int, num_pits: int = None) -> Dict:
+    """Run a full episode and return complete state history for replay."""
+    world = WumpusWorld(rows, cols, num_pits)
+    agent = WumpusAgent(rows, cols)
+
+    steps = []
+    max_steps = rows * cols * 4
+
+    step_count = 0
+    while agent.alive and step_count < max_steps:
+        step_info = agent.enter_cell(world)
+        step_info["grid"] = {
+            f"{r},{c}": agent.cell_status.get((r,c), "unknown")
+            for r in range(1, rows+1) for c in range(1, cols+1)
+        }
+        step_info["pos"] = list(agent.pos)
+        step_info["inference_steps_total"] = agent.kb.inference_steps
+        step_info["log"] = list(agent.log)
+        steps.append(step_info)
+
+        if not agent.alive:
+            break
+
+        next_cell = agent.choose_next()
+        if next_cell is None:
+            agent.log.append("No safe moves available – agent stops.")
+            break
+        agent.pos = next_cell
+        step_count += 1
+
+    return {
+        "rows": rows,
+        "cols": cols,
+        "world": {
+            "pits":   [list(p)    for p in world.pits],
+            "wumpus": list(world.wumpus) if world.wumpus else None,
+            "gold":   list(world.gold)   if world.gold   else None,
+        },
+        "steps": steps,
+        "survived": agent.alive,
+        "gold_found": agent.has_gold,
+        "total_inference_steps": agent.kb.inference_steps,
+    }
